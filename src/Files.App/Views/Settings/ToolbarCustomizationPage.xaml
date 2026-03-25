@@ -306,6 +306,7 @@
 									HorizontalAlignment="Left"
 									VerticalAlignment="Center"
 									AutomationProperties.Name="{helpers:ResourceString Name=Remove}"
+									BorderThickness="0"
 									Command="{Binding ElementName=PageRoot, Path=DataContext.RemoveToolbarItemCommand, Mode=OneWay}"
 									CommandParameter="{x:Bind}"
 									Style="{StaticResource ToolbarCustomizationRemoveButtonStyle}"
