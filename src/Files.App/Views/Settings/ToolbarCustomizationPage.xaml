@@ -46,9 +46,6 @@
 				<Setter Property="Background" Value="Transparent" />
 				<Setter Property="BorderBrush" Value="Transparent" />
 				<Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
-				<Style.Resources>
-					<StaticResource x:Key="ButtonForegroundPointerOver" ResourceKey="SystemFillColorCriticalBrush" />
-				</Style.Resources>
 			</Style>
 		</ResourceDictionary>
 	</Page.Resources>
@@ -313,6 +310,9 @@
 									CommandParameter="{x:Bind}"
 									Style="{StaticResource ToolbarCustomizationRemoveButtonStyle}"
 									ToolTipService.ToolTip="{helpers:ResourceString Name=Remove}">
+									<Button.Resources>
+										<StaticResource x:Key="ButtonForegroundPointerOver" ResourceKey="SystemFillColorCriticalBrush" />
+									</Button.Resources>
 									<FontIcon FontSize="14" Glyph="&#xE711;" />
 								</Button>
 							</Grid>
