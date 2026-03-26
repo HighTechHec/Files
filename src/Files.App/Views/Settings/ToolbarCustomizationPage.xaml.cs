@@ -7,7 +7,6 @@ using Files.App.ViewModels.Settings;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
-using System.Collections.Specialized;
 using Windows.ApplicationModel.DataTransfer;
 
 namespace Files.App.Views.Settings
@@ -15,9 +14,7 @@ namespace Files.App.Views.Settings
 	public sealed partial class ToolbarCustomizationPage : Page
 	{
 		private ToolbarCustomizationViewModel ViewModel => (ToolbarCustomizationViewModel)DataContext;
-		private Style PreviewFlyoutButtonStyle => (Style)Resources["ToolBarAppBarButtonFlyoutStyle"];
 		private ToolbarItemDescriptor? draggedAvailableItem;
-		private ObservableCollection<ToolbarItemDescriptor>? subscribedContextToolbarItems;
 		private WindowEx? hostWindow;
 		// Unloaded also runs after Save/Cancel closes the host window, so only auto-restore when the close was not requested by the view model.
 		private bool skipSessionRestoreOnUnload;
@@ -45,97 +42,28 @@ namespace Files.App.Views.Settings
 			ViewModel.BeginToolbarCustomizationSession();
 			skipSessionRestoreOnUnload = false;
 			ViewModel.CloseRequested += ViewModel_CloseRequested;
-
-			UpdatePreviewSubscriptions(subscribe: true);
+			ViewModel.PreviewChanged += OnPreviewChanged;
 			RebuildPreviewCommandBar();
 		}
 
 		private void ToolbarCustomizationPage_Unloaded(object sender, RoutedEventArgs e)
 		{
 			ViewModel.CloseRequested -= ViewModel_CloseRequested;
-			UpdatePreviewSubscriptions(subscribe: false);
+			ViewModel.PreviewChanged -= OnPreviewChanged;
 
 			if (!skipSessionRestoreOnUnload)
 				ViewModel.CancelToolbarCustomizationSession();
 		}
 
-		private void UpdatePreviewSubscriptions(bool subscribe)
-		{
-			if (subscribe)
-				ViewModel.PropertyChanged += ViewModel_PropertyChanged;
-			else
-				ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
-
-			UpdateToolbarCollectionSubscription(ViewModel.AlwaysVisibleToolbarItems, subscribe);
-			UpdateContextPreviewSubscription(subscribe ? ViewModel.ToolbarItems : null);
-		}
-
-		private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
-		{
-			if (e.PropertyName is not nameof(ToolbarCustomizationViewModel.SelectedToolbarContextId))
-				return;
-
-			UpdateContextPreviewSubscription(ViewModel.ToolbarItems);
-			RebuildPreviewCommandBar();
-		}
-
-		private void UpdateContextPreviewSubscription(ObservableCollection<ToolbarItemDescriptor>? items)
-		{
-			var nextItems = ReferenceEquals(items, ViewModel.AlwaysVisibleToolbarItems) ? null : items;
-			if (ReferenceEquals(nextItems, subscribedContextToolbarItems))
-				return;
-
-			UpdateToolbarCollectionSubscription(subscribedContextToolbarItems, subscribe: false);
-			subscribedContextToolbarItems = nextItems;
-			UpdateToolbarCollectionSubscription(subscribedContextToolbarItems, subscribe: true);
-		}
-
-		private void UpdateToolbarCollectionSubscription(ObservableCollection<ToolbarItemDescriptor>? items, bool subscribe)
-		{
-			if (items is null)
-				return;
-
-			if (subscribe)
-				items.CollectionChanged += PreviewItems_CollectionChanged;
-			else
-				items.CollectionChanged -= PreviewItems_CollectionChanged;
-
-			UpdatePreviewItemSubscriptions(items, subscribe);
-		}
-
-		private void PreviewItems_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
-		{
-			UpdatePreviewItemSubscriptions(e.OldItems, subscribe: false);
-			UpdatePreviewItemSubscriptions(e.NewItems, subscribe: true);
-			RebuildPreviewCommandBar();
-		}
-
-		private void UpdatePreviewItemSubscriptions(System.Collections.IEnumerable? items, bool subscribe)
-		{
-			if (items is null)
-				return;
-
-			foreach (var item in items.OfType<ToolbarItemDescriptor>())
-			{
-				if (subscribe)
-					item.PropertyChanged += ToolbarItem_PropertyChanged;
-				else
-					item.PropertyChanged -= ToolbarItem_PropertyChanged;
-			}
-		}
-
-		private void ToolbarItem_PropertyChanged(object? sender, PropertyChangedEventArgs e)
-		{
-			if (e.PropertyName is nameof(ToolbarItemDescriptor.ShowIcon)
-				or nameof(ToolbarItemDescriptor.ShowLabel))
-				RebuildPreviewCommandBar();
-		}
+		private void OnPreviewChanged(object? sender, EventArgs e)
+			=> RebuildPreviewCommandBar();
 
 		private void RebuildPreviewCommandBar()
 		{
 			PreviewCommandBar.PrimaryCommands.Clear();
 
-			foreach (var item in GetPreviewItems())
+			var items = ViewModel.IsSelectedContextAlwaysVisible ? ViewModel.AlwaysVisibleToolbarItems : ViewModel.ToolbarItems;
+			foreach (var item in items)
 			{
 				if (CreatePreviewCommandElement(item) is { } command)
 					PreviewCommandBar.PrimaryCommands.Add(command);
@@ -144,15 +72,12 @@ namespace Files.App.Views.Settings
 			UpdatePreviewSeparatorVisibility();
 		}
 
-		private IEnumerable<ToolbarItemDescriptor> GetPreviewItems()
-			=> ViewModel.IsSelectedContextAlwaysVisible ? ViewModel.AlwaysVisibleToolbarItems : ViewModel.ToolbarItems;
-
 		private ICommandBarElement? CreatePreviewCommandElement(ToolbarItemDescriptor item)
 		{
 			if (item.IsSeparator)
 				return new AppBarSeparator();
 
-			var showIcon = item.ShowIcon && CanShowIcon(item);
+			var showIcon = item.ShowIcon && item.HasIcon;
 			if (!showIcon && !item.ShowLabel)
 				return null;
 
@@ -165,7 +90,7 @@ namespace Files.App.Views.Settings
 				LabelPosition = item.ShowLabel ? CommandBarLabelPosition.Default : CommandBarLabelPosition.Collapsed,
 				IsEnabled = true,
 				IsHitTestVisible = false,
-				Style = useStyledTemplate ? PreviewFlyoutButtonStyle : null,
+				Style = useStyledTemplate ? (Style)Resources["ToolBarAppBarButtonFlyoutStyle"] : null,
 				Flyout = item.IsGroup ? new MenuFlyout() : null,
 			};
 
@@ -176,9 +101,6 @@ namespace Files.App.Views.Settings
 
 			return button;
 		}
-
-		private static bool CanShowIcon(ToolbarItemDescriptor item)
-			=> !string.IsNullOrEmpty(item.Glyph.ThemedIconStyle) || !string.IsNullOrEmpty(item.Glyph.BaseGlyph);
 
 		private static void CollapseButtonIconViewbox(object sender, RoutedEventArgs e)
 		{
