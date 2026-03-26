@@ -9,10 +9,10 @@ namespace Files.App.ViewModels.Settings
 		private readonly ICommandManager CommandManager;
 
 		private readonly Dictionary<string, ObservableCollection<ToolbarItemDescriptor>> toolbarItemsByContext = new(StringComparer.Ordinal);
-		private IEnumerable<ToolbarItemDescriptor> AllToolbarItems => toolbarItemsByContext.Values.SelectMany(static items => items);
-		private IEnumerable<string> ToolbarContextIds => ToolbarContexts.Select(static context => context.Key);
-		private IEnumerable<ToolbarItemDescriptor> AvailableToolbarItems
-			=> ToolbarItemDescriptor.GetAvailableItemsForContext(GetCurrentToolbarContextId(), CommandManager);
+		private IEnumerable<ToolbarItemDescriptor> ToolbarItemsAcrossContexts => toolbarItemsByContext.Values.SelectMany(static items => items);
+		private IEnumerable<string> ToolbarContextKeys => ToolbarContexts.Select(static context => context.Key);
+		private IEnumerable<ToolbarItemDescriptor> CurrentAvailableToolbarItems
+			=> ToolbarItemDescriptor.GetAvailableItemsForContext(ResolveCurrentToolbarContextId(), CommandManager);
 
 		public ObservableCollection<KeyValuePair<string, string>> ToolbarContexts { get; } = [];
 
@@ -20,7 +20,7 @@ namespace Files.App.ViewModels.Settings
 		/// The current items in the selected toolbar context, displayed in the settings UI.
 		/// </summary>
 		public ObservableCollection<ToolbarItemDescriptor> ToolbarItems
-			=> GetToolbarItems(GetCurrentToolbarContextId());
+			=> GetToolbarItems(ResolveCurrentToolbarContextId());
 
 		/// <summary>
 		/// The always-visible items used in the preview pane.
@@ -34,10 +34,10 @@ namespace Files.App.ViewModels.Settings
 		public ObservableCollection<ToolbarAvailableTreeItem> AvailableToolbarTreeItems { get; } = [];
 
 		public string SelectedToolbarContextName
-			=> ToolbarItemDescriptor.GetContextDisplayName(GetCurrentToolbarContextId());
+			=> ToolbarItemDescriptor.GetContextDisplayName(ResolveCurrentToolbarContextId());
 
 		public bool IsSelectedContextAlwaysVisible
-			=> GetCurrentToolbarContextId() == ToolbarDefaultsTemplate.AlwaysVisibleContextId;
+			=> ResolveCurrentToolbarContextId() == ToolbarDefaultsTemplate.AlwaysVisibleContextId;
 
 		[ObservableProperty]
 		public partial string? SelectedToolbarContextId { get; set; }
@@ -45,9 +45,9 @@ namespace Files.App.ViewModels.Settings
 		[ObservableProperty]
 		public partial bool HasToolbarChanges { get; set; }
 
-		private bool isReplacingToolbarItems;
-		private bool isToolbarCustomizationSessionActive;
-		private Dictionary<string, List<ToolbarItemSettingsEntry>>? toolbarCustomizationSessionSnapshot;
+		private bool isApplyingToolbarItems;
+		private bool isCustomizationSessionActive;
+		private Dictionary<string, List<ToolbarItemSettingsEntry>>? customizationSessionSnapshot;
 
 		public event EventHandler? CloseRequested;
 
@@ -63,39 +63,39 @@ namespace Files.App.ViewModels.Settings
 
 		public void BeginToolbarCustomizationSession()
 		{
-			if (isToolbarCustomizationSessionActive)
+			if (isCustomizationSessionActive)
 				return;
 
 			SelectedToolbarContextId = ToolbarDefaultsTemplate.AlwaysVisibleContextId;
 
-			toolbarCustomizationSessionSnapshot = CreateCurrentToolbarItemsSnapshot();
-			isToolbarCustomizationSessionActive = true;
+			customizationSessionSnapshot = CaptureToolbarItemsSnapshot();
+			isCustomizationSessionActive = true;
 			HasToolbarChanges = false;
 		}
 
 		public void SaveToolbarCustomizationSession()
-			=> CompleteToolbarCustomizationSession(saveChanges: true);
+			=> FinishCustomizationSession(persistChanges: true);
 
 		public void CancelToolbarCustomizationSession()
-			=> CompleteToolbarCustomizationSession(saveChanges: false);
+			=> FinishCustomizationSession(persistChanges: false);
 
-		private void CompleteToolbarCustomizationSession(bool saveChanges)
+		private void FinishCustomizationSession(bool persistChanges)
 		{
-			if (!isToolbarCustomizationSessionActive)
+			if (!isCustomizationSessionActive)
 				return;
 
-			if (saveChanges)
+			if (persistChanges)
 				SaveToolbarItems();
-			else if (toolbarCustomizationSessionSnapshot is not null)
-				ReplaceToolbarItems(toolbarCustomizationSessionSnapshot, saveChanges: true);
+			else if (customizationSessionSnapshot is not null)
+				ApplyToolbarItems(customizationSessionSnapshot, saveChanges: true);
 
-			EndToolbarCustomizationSession();
+			ResetCustomizationSessionState();
 		}
 
-		private void EndToolbarCustomizationSession()
+		private void ResetCustomizationSessionState()
 		{
-			isToolbarCustomizationSessionActive = false;
-			toolbarCustomizationSessionSnapshot = null;
+			isCustomizationSessionActive = false;
+			customizationSessionSnapshot = null;
 			HasToolbarChanges = false;
 		}
 
@@ -111,14 +111,14 @@ namespace Files.App.ViewModels.Settings
 		{
 			ToolbarContexts.Clear();
 
-			foreach (var contextId in GetKnownToolbarContextIds())
+			foreach (var contextId in BuildKnownToolbarContextIds())
 			{
 				ToolbarContexts.Add(new(contextId, ToolbarItemDescriptor.GetContextDisplayName(contextId)));
 				_ = GetToolbarItems(contextId);
 			}
 		}
 
-		private IEnumerable<string> GetKnownToolbarContextIds()
+		private IEnumerable<string> BuildKnownToolbarContextIds()
 		{
 			var knownContexts = new HashSet<string>(ToolbarDefaultsTemplate.DefaultItemsByContext.Keys, StringComparer.Ordinal)
 			{
@@ -140,33 +140,38 @@ namespace Files.App.ViewModels.Settings
 		private void LoadToolbarItems()
 		{
 			var itemsByContext = UserSettingsService.AppearanceSettingsService.CustomToolbarItems is { Count: > 0 } savedContextItems
-				? NormalizeToolbarItemsByContext(savedContextItems)
+				? NormalizeToolbarSettingsByContext(savedContextItems)
 				: ToolbarDefaultsTemplate.CreateDefaultItemsByContext();
 
-			ReplaceToolbarItems(itemsByContext, saveChanges: false);
+			ApplyToolbarItems(itemsByContext, saveChanges: false);
 		}
 
-		private void ReplaceToolbarItems(IReadOnlyDictionary<string, List<ToolbarItemSettingsEntry>> itemsByContext, bool saveChanges)
+		private void ApplyToolbarItems(IReadOnlyDictionary<string, List<ToolbarItemSettingsEntry>> itemsByContext, bool saveChanges)
 		{
-			isReplacingToolbarItems = true;
-			UpdateItemPropertySubscriptions(AllToolbarItems, subscribe: false);
+			isApplyingToolbarItems = true;
+			UpdateToolbarItemSubscriptions(ToolbarItemsAcrossContexts, subscribe: false);
 
-			foreach (var contextId in ToolbarContextIds)
-				GetToolbarItems(contextId).Clear();
-
-			foreach (var pair in itemsByContext)
+			try
 			{
-				var contextId = ToolbarDefaultsTemplate.NormalizeContextId(pair.Key);
-				var items = GetToolbarItems(contextId);
+				foreach (var contextId in ToolbarContextKeys)
+					GetToolbarItems(contextId).Clear();
 
-				foreach (var descriptor in pair.Value
-					.Select(settingsEntry => ToolbarItemDescriptor.Resolve(settingsEntry, CommandManager, contextId))
-					.OfType<ToolbarItemDescriptor>())
-					items.Add(descriptor);
+				foreach (var pair in itemsByContext)
+				{
+					var contextId = ToolbarDefaultsTemplate.NormalizeContextId(pair.Key);
+					var items = GetToolbarItems(contextId);
+
+					foreach (var descriptor in pair.Value
+						.Select(settingsEntry => ToolbarItemDescriptor.Resolve(settingsEntry, CommandManager, contextId))
+						.OfType<ToolbarItemDescriptor>())
+						items.Add(descriptor);
+				}
 			}
-
-			UpdateItemPropertySubscriptions(AllToolbarItems, subscribe: true);
-			isReplacingToolbarItems = false;
+			finally
+			{
+				UpdateToolbarItemSubscriptions(ToolbarItemsAcrossContexts, subscribe: true);
+				isApplyingToolbarItems = false;
+			}
 
 			RefreshAvailableItems();
 			OnPropertyChanged(nameof(ToolbarItems));
@@ -176,9 +181,9 @@ namespace Files.App.ViewModels.Settings
 				SaveToolbarItems();
 		}
 
-		private Dictionary<string, List<ToolbarItemSettingsEntry>> NormalizeToolbarItemsByContext(IReadOnlyDictionary<string, List<ToolbarItemSettingsEntry>> itemsByContext)
+		private Dictionary<string, List<ToolbarItemSettingsEntry>> NormalizeToolbarSettingsByContext(IReadOnlyDictionary<string, List<ToolbarItemSettingsEntry>> itemsByContext)
 		{
-			var normalized = ToolbarContextIds.ToDictionary(static contextId => contextId, static _ => new List<ToolbarItemSettingsEntry>(), StringComparer.Ordinal);
+			var normalized = ToolbarContextKeys.ToDictionary(static contextId => contextId, static _ => new List<ToolbarItemSettingsEntry>(), StringComparer.Ordinal);
 
 			foreach (var pair in itemsByContext)
 			{
@@ -198,13 +203,13 @@ namespace Files.App.ViewModels.Settings
 
 		private void ToolbarItems_CollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
 		{
-			if (isReplacingToolbarItems)
+			if (isApplyingToolbarItems)
 				return;
 
-			UpdateItemPropertySubscriptions(e.OldItems, subscribe: false);
-			UpdateItemPropertySubscriptions(e.NewItems, subscribe: true);
+			UpdateToolbarItemSubscriptions(e.OldItems, subscribe: false);
+			UpdateToolbarItemSubscriptions(e.NewItems, subscribe: true);
 
-			HandleToolbarChange();
+			PersistOrTrackToolbarChange();
 		}
 
 		private void ToolbarItem_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -213,18 +218,18 @@ namespace Files.App.ViewModels.Settings
 				and not nameof(ToolbarItemDescriptor.ShowLabel))
 				return;
 
-			HandleToolbarChange();
+			PersistOrTrackToolbarChange();
 		}
 
-		private Dictionary<string, List<ToolbarItemSettingsEntry>> CreateCurrentToolbarItemsSnapshot()
-			=> ToolbarContextIds.ToDictionary(
+		private Dictionary<string, List<ToolbarItemSettingsEntry>> CaptureToolbarItemsSnapshot()
+			=> ToolbarContextKeys.ToDictionary(
 					contextId => contextId,
 					contextId => GetToolbarItems(contextId).Select(static item => item.ToSettingsEntry()).ToList(),
 					StringComparer.Ordinal);
 
-		private void HandleToolbarChange()
+		private void PersistOrTrackToolbarChange()
 		{
-			if (isToolbarCustomizationSessionActive)
+			if (isCustomizationSessionActive)
 			{
 				HasToolbarChanges = true;
 				return;
@@ -233,7 +238,7 @@ namespace Files.App.ViewModels.Settings
 			SaveToolbarItems();
 		}
 
-		private void UpdateItemPropertySubscriptions(System.Collections.IEnumerable? items, bool subscribe)
+		private void UpdateToolbarItemSubscriptions(System.Collections.IEnumerable? items, bool subscribe)
 		{
 			if (items is null)
 				return;
@@ -253,7 +258,8 @@ namespace Files.App.ViewModels.Settings
 
 			var categoryNodesByPath = new Dictionary<string, ToolbarAvailableTreeItem>(StringComparer.OrdinalIgnoreCase);
 
-			foreach (var item in AvailableToolbarItems
+			// Build category nodes on demand so the tree only includes paths used by the current context.
+			foreach (var item in CurrentAvailableToolbarItems
 				.OrderBy(static item => item.CategoryPath, StringComparer.OrdinalIgnoreCase)
 				.ThenBy(static item => item.ExtendedDisplayName, StringComparer.OrdinalIgnoreCase))
 			{
@@ -292,11 +298,11 @@ namespace Files.App.ViewModels.Settings
 		}
 
 		private void SaveToolbarItems()
-			=> UserSettingsService.AppearanceSettingsService.CustomToolbarItems = CreateCurrentToolbarItemsSnapshot();
+			=> UserSettingsService.AppearanceSettingsService.CustomToolbarItems = CaptureToolbarItemsSnapshot();
 
 		public void InsertAvailableToolbarItemAt(ToolbarItemDescriptor sourceItem, int index)
 		{
-			var contextId = GetCurrentToolbarContextId();
+			var contextId = ResolveCurrentToolbarContextId();
 			var targetItems = GetToolbarItems(contextId);
 
 			if (ToolbarItemDescriptor.Resolve(sourceItem.ToSettingsEntry(), CommandManager, contextId) is not { } clonedItem)
@@ -319,25 +325,25 @@ namespace Files.App.ViewModels.Settings
 		[RelayCommand]
 		private void ResetToolbar()
 		{
-			ReplaceToolbarItems(ToolbarDefaultsTemplate.CreateDefaultItemsByContext(), saveChanges: false);
-			HandleToolbarChange();
+			ApplyToolbarItems(ToolbarDefaultsTemplate.CreateDefaultItemsByContext(), saveChanges: false);
+			PersistOrTrackToolbarChange();
 		}
 
 		[RelayCommand]
 		private void SaveToolbar()
 		{
 			SaveToolbarCustomizationSession();
-			RequestClose();
+			RaiseCloseRequested();
 		}
 
 		[RelayCommand]
 		private void CancelToolbar()
 		{
 			CancelToolbarCustomizationSession();
-			RequestClose();
+			RaiseCloseRequested();
 		}
 
-		private void RequestClose()
+		private void RaiseCloseRequested()
 			=> CloseRequested?.Invoke(this, EventArgs.Empty);
 
 		private ObservableCollection<ToolbarItemDescriptor> GetToolbarItems(string contextId)
@@ -352,7 +358,7 @@ namespace Files.App.ViewModels.Settings
 			return items;
 		}
 
-		private string GetCurrentToolbarContextId()
+		private string ResolveCurrentToolbarContextId()
 			=> ToolbarDefaultsTemplate.NormalizeContextId(
 				SelectedToolbarContextId,
 				nullFallbackContextId: ToolbarDefaultsTemplate.AlwaysVisibleContextId,

@@ -11,32 +11,32 @@ namespace Files.App.Views.Settings
 	internal static class ToolbarCustomizationDialog
 	{
 		private const string WindowPersistenceId = "ToolbarCustomizationWindow";
-		private static WindowEx? toolbarCustomizationWindow;
+		private static WindowEx? customizationWindow;
 
 		public static void Show()
 		{
-			var appThemeModeService = Ioc.Default.GetRequiredService<IAppThemeModeService>();
-			var window = toolbarCustomizationWindow;
+			var themeService = Ioc.Default.GetRequiredService<IAppThemeModeService>();
+			var window = customizationWindow;
 			if (window is null)
-				toolbarCustomizationWindow = window = CreateWindow(appThemeModeService);
+				customizationWindow = window = CreateCustomizationWindow(themeService);
 			else if (window.Content is Frame frame)
-				frame.RequestedTheme = appThemeModeService.AppThemeMode;
+				frame.RequestedTheme = themeService.AppThemeMode;
 
-			UpdateTitleBar(window);
+			UpdateWindowTitleBar(window);
 
-			appThemeModeService.SetAppThemeMode(
+			themeService.SetAppThemeMode(
 				window,
 				window.AppWindow.TitleBar,
-				appThemeModeService.AppThemeMode,
+				themeService.AppThemeMode,
 				callThemeModeChangedEvent: false);
 
 			window.AppWindow.Show();
 			window.Activate();
 		}
 
-		private static WindowEx CreateWindow(IAppThemeModeService appThemeModeService)
+		private static WindowEx CreateCustomizationWindow(IAppThemeModeService themeService)
 		{
-			var frame = new Frame { RequestedTheme = appThemeModeService.AppThemeMode };
+			var frame = new Frame { RequestedTheme = themeService.AppThemeMode };
 			var window = new WindowEx(460, 400)
 			{
 				PersistenceId = WindowPersistenceId,
@@ -54,17 +54,18 @@ namespace Files.App.Views.Settings
 			appWindow.SetIcon(AppLifecycleHelper.AppIconPath);
 
 			frame.Navigate(typeof(ToolbarCustomizationPage), window, new SuppressNavigationTransitionInfo());
-			Resize(appWindow);
+			ResizeWindow(appWindow);
 			return window;
 		}
 
-		private static void UpdateTitleBar(WindowEx window)
+		private static void UpdateWindowTitleBar(WindowEx window)
 		{
+			// The page owns the draggable title bar element, so reapply it after navigation and theme updates.
 			if ((window.Content as Frame)?.Content is ToolbarCustomizationPage page)
 				window.SetTitleBar(page.TitleBarElement);
 		}
 
-		private static void Resize(Microsoft.UI.Windowing.AppWindow appWindow)
+		private static void ResizeWindow(Microsoft.UI.Windowing.AppWindow appWindow)
 		{
 			var width = Math.Max(1, Convert.ToInt32(760 * App.AppModel.AppWindowDPI));
 			var height = Math.Max(1, Convert.ToInt32(560 * App.AppModel.AppWindowDPI));
@@ -73,10 +74,10 @@ namespace Files.App.Views.Settings
 
 		private static void ToolbarCustomizationWindow_Closed(object sender, WindowEventArgs _)
 		{
-			if (toolbarCustomizationWindow is not null)
-				toolbarCustomizationWindow.Closed -= ToolbarCustomizationWindow_Closed;
+			if (customizationWindow is not null)
+				customizationWindow.Closed -= ToolbarCustomizationWindow_Closed;
 
-			toolbarCustomizationWindow = null;
+			customizationWindow = null;
 		}
 	}
 }

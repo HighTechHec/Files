@@ -15,13 +15,14 @@ namespace Files.App.Views.Settings
 	public sealed partial class ToolbarCustomizationPage : Page
 	{
 		private ToolbarCustomizationViewModel ViewModel => (ToolbarCustomizationViewModel)DataContext;
-		private Style PreviewButtonStyle => (Style)Resources["ToolBarAppBarButtonFlyoutStyle"];
-		private ToolbarItemDescriptor? draggedAvailableToolbarItem;
-		private ObservableCollection<ToolbarItemDescriptor>? observedContextToolbarItems;
-		private WindowEx? ownerWindow;
-		private bool isSessionComplete;
-		private static readonly Thickness AddedItemsDividerThickness = new(0, 0, 0, 1);
-		private static readonly Thickness NoDividerThickness = new(0);
+		private Style PreviewFlyoutButtonStyle => (Style)Resources["ToolBarAppBarButtonFlyoutStyle"];
+		private ToolbarItemDescriptor? draggedAvailableItem;
+		private ObservableCollection<ToolbarItemDescriptor>? subscribedContextToolbarItems;
+		private WindowEx? hostWindow;
+		// Unloaded also runs after Save/Cancel closes the host window, so only auto-restore when the close was not requested by the view model.
+		private bool skipSessionRestoreOnUnload;
+		private static readonly Thickness ItemDividerThickness = new(0, 0, 0, 1);
+		private static readonly Thickness NoBorderThickness = new(0);
 		public FrameworkElement TitleBarElement => WindowTitleBar;
 
 		public ToolbarCustomizationPage()
@@ -36,37 +37,37 @@ namespace Files.App.Views.Settings
 		protected override void OnNavigatedTo(NavigationEventArgs e)
 		{
 			base.OnNavigatedTo(e);
-			ownerWindow = e.Parameter as WindowEx;
+			hostWindow = e.Parameter as WindowEx;
 		}
 
 		private void ToolbarCustomizationPage_Loaded(object sender, RoutedEventArgs e)
 		{
 			ViewModel.BeginToolbarCustomizationSession();
-			isSessionComplete = false;
+			skipSessionRestoreOnUnload = false;
 			ViewModel.CloseRequested += ViewModel_CloseRequested;
 
-			SetPreviewSubscriptions(subscribe: true);
+			UpdatePreviewSubscriptions(subscribe: true);
 			RebuildPreviewCommandBar();
 		}
 
 		private void ToolbarCustomizationPage_Unloaded(object sender, RoutedEventArgs e)
 		{
 			ViewModel.CloseRequested -= ViewModel_CloseRequested;
-			SetPreviewSubscriptions(subscribe: false);
+			UpdatePreviewSubscriptions(subscribe: false);
 
-			if (!isSessionComplete)
+			if (!skipSessionRestoreOnUnload)
 				ViewModel.CancelToolbarCustomizationSession();
 		}
 
-		private void SetPreviewSubscriptions(bool subscribe)
+		private void UpdatePreviewSubscriptions(bool subscribe)
 		{
 			if (subscribe)
 				ViewModel.PropertyChanged += ViewModel_PropertyChanged;
 			else
 				ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
 
-			SetToolbarSubscription(ViewModel.AlwaysVisibleToolbarItems, subscribe);
-			SetObservedContextToolbarItems(subscribe ? ViewModel.ToolbarItems : null);
+			UpdateToolbarCollectionSubscription(ViewModel.AlwaysVisibleToolbarItems, subscribe);
+			UpdateContextPreviewSubscription(subscribe ? ViewModel.ToolbarItems : null);
 		}
 
 		private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -74,22 +75,22 @@ namespace Files.App.Views.Settings
 			if (e.PropertyName is not nameof(ToolbarCustomizationViewModel.SelectedToolbarContextId))
 				return;
 
-			SetObservedContextToolbarItems(ViewModel.ToolbarItems);
+			UpdateContextPreviewSubscription(ViewModel.ToolbarItems);
 			RebuildPreviewCommandBar();
 		}
 
-		private void SetObservedContextToolbarItems(ObservableCollection<ToolbarItemDescriptor>? items)
+		private void UpdateContextPreviewSubscription(ObservableCollection<ToolbarItemDescriptor>? items)
 		{
 			var nextItems = ReferenceEquals(items, ViewModel.AlwaysVisibleToolbarItems) ? null : items;
-			if (ReferenceEquals(nextItems, observedContextToolbarItems))
+			if (ReferenceEquals(nextItems, subscribedContextToolbarItems))
 				return;
 
-			SetToolbarSubscription(observedContextToolbarItems, subscribe: false);
-			observedContextToolbarItems = nextItems;
-			SetToolbarSubscription(observedContextToolbarItems, subscribe: true);
+			UpdateToolbarCollectionSubscription(subscribedContextToolbarItems, subscribe: false);
+			subscribedContextToolbarItems = nextItems;
+			UpdateToolbarCollectionSubscription(subscribedContextToolbarItems, subscribe: true);
 		}
 
-		private void SetToolbarSubscription(ObservableCollection<ToolbarItemDescriptor>? items, bool subscribe)
+		private void UpdateToolbarCollectionSubscription(ObservableCollection<ToolbarItemDescriptor>? items, bool subscribe)
 		{
 			if (items is null)
 				return;
@@ -99,17 +100,17 @@ namespace Files.App.Views.Settings
 			else
 				items.CollectionChanged -= PreviewItems_CollectionChanged;
 
-			UpdateItemPropertySubscriptions(items, subscribe);
+			UpdatePreviewItemSubscriptions(items, subscribe);
 		}
 
 		private void PreviewItems_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
 		{
-			UpdateItemPropertySubscriptions(e.OldItems, subscribe: false);
-			UpdateItemPropertySubscriptions(e.NewItems, subscribe: true);
+			UpdatePreviewItemSubscriptions(e.OldItems, subscribe: false);
+			UpdatePreviewItemSubscriptions(e.NewItems, subscribe: true);
 			RebuildPreviewCommandBar();
 		}
 
-		private void UpdateItemPropertySubscriptions(System.Collections.IEnumerable? items, bool subscribe)
+		private void UpdatePreviewItemSubscriptions(System.Collections.IEnumerable? items, bool subscribe)
 		{
 			if (items is null)
 				return;
@@ -136,7 +137,7 @@ namespace Files.App.Views.Settings
 
 			foreach (var item in GetPreviewItems())
 			{
-				if (CreatePreviewCommand(item) is { } command)
+				if (CreatePreviewCommandElement(item) is { } command)
 					PreviewCommandBar.PrimaryCommands.Add(command);
 			}
 
@@ -146,12 +147,12 @@ namespace Files.App.Views.Settings
 		private IEnumerable<ToolbarItemDescriptor> GetPreviewItems()
 			=> ViewModel.IsSelectedContextAlwaysVisible ? ViewModel.AlwaysVisibleToolbarItems : ViewModel.ToolbarItems;
 
-		private ICommandBarElement? CreatePreviewCommand(ToolbarItemDescriptor item)
+		private ICommandBarElement? CreatePreviewCommandElement(ToolbarItemDescriptor item)
 		{
 			if (item.IsSeparator)
 				return new AppBarSeparator();
 
-			var showIcon = item.ShowIcon && HasVisibleIcon(item);
+			var showIcon = item.ShowIcon && CanShowIcon(item);
 			if (!showIcon && !item.ShowLabel)
 				return null;
 
@@ -164,7 +165,7 @@ namespace Files.App.Views.Settings
 				LabelPosition = item.ShowLabel ? CommandBarLabelPosition.Default : CommandBarLabelPosition.Collapsed,
 				IsEnabled = true,
 				IsHitTestVisible = false,
-				Style = useStyledTemplate ? PreviewButtonStyle : null,
+				Style = useStyledTemplate ? PreviewFlyoutButtonStyle : null,
 				Flyout = item.IsGroup ? new MenuFlyout() : null,
 			};
 
@@ -176,13 +177,14 @@ namespace Files.App.Views.Settings
 			return button;
 		}
 
-		private static bool HasVisibleIcon(ToolbarItemDescriptor item)
+		private static bool CanShowIcon(ToolbarItemDescriptor item)
 			=> !string.IsNullOrEmpty(item.Glyph.ThemedIconStyle) || !string.IsNullOrEmpty(item.Glyph.BaseGlyph);
 
 		private static void CollapseButtonIconViewbox(object sender, RoutedEventArgs e)
 		{
 			var button = (AppBarButton)sender;
 			button.Loaded -= CollapseButtonIconViewbox;
+			// WinUI keeps the icon viewbox in the template even when we intentionally omit the icon.
 			if (button.FindDescendant("ContentViewbox") is Viewbox viewbox)
 				viewbox.Visibility = Visibility.Collapsed;
 		}
@@ -193,7 +195,7 @@ namespace Files.App.Views.Settings
 				return;
 
 			var isLastItem = args.ItemIndex == sender.Items.Count - 1;
-			container.BorderThickness = isLastItem ? NoDividerThickness : AddedItemsDividerThickness;
+			container.BorderThickness = isLastItem ? NoBorderThickness : ItemDividerThickness;
 		}
 
 		private void UpdatePreviewSeparatorVisibility()
@@ -223,38 +225,38 @@ namespace Files.App.Views.Settings
 
 		private void AvailableToolbarItemsTree_DragItemsStarting(TreeView sender, TreeViewDragItemsStartingEventArgs e)
 		{
-			if (GetDraggedAvailableToolbarItem(sender, e) is not { } draggedItem)
+			if (GetDraggedAvailableItem(sender, e) is not { } draggedItem)
 			{
-				draggedAvailableToolbarItem = null;
+				draggedAvailableItem = null;
 				e.Cancel = true;
 				e.Data.RequestedOperation = DataPackageOperation.None;
 				return;
 			}
 
-			draggedAvailableToolbarItem = draggedItem;
+			draggedAvailableItem = draggedItem;
 			e.Data.RequestedOperation = DataPackageOperation.Copy;
 		}
 
 		private void AvailableToolbarItemsTree_DragItemsCompleted(TreeView sender, TreeViewDragItemsCompletedEventArgs args)
-			=> draggedAvailableToolbarItem = null;
+			=> draggedAvailableItem = null;
 
 		private void AddedToolbarItemsList_DragOver(object sender, DragEventArgs e)
 			=> e.AcceptedOperation = DataPackageOperation.Copy;
 
 		private void AddedToolbarItemsList_Drop(object sender, DragEventArgs e)
 		{
-			if (draggedAvailableToolbarItem is null || sender is not ListView listView)
+			if (draggedAvailableItem is null || sender is not ListView listView)
 				return;
 
-			var insertIndex = GetDropInsertIndex(listView, e);
-			ViewModel.InsertAvailableToolbarItemAt(draggedAvailableToolbarItem, insertIndex);
-			draggedAvailableToolbarItem = null;
+			var insertIndex = ResolveDropInsertIndex(listView, e);
+			ViewModel.InsertAvailableToolbarItemAt(draggedAvailableItem, insertIndex);
+			draggedAvailableItem = null;
 		}
 
-		private static ToolbarItemDescriptor? GetDraggedAvailableToolbarItem(TreeView sender, TreeViewDragItemsStartingEventArgs e)
+		private static ToolbarItemDescriptor? GetDraggedAvailableItem(TreeView sender, TreeViewDragItemsStartingEventArgs e)
 			=> (e.Items.OfType<ToolbarAvailableTreeItem>().FirstOrDefault() ?? sender.SelectedItem as ToolbarAvailableTreeItem)?.ToolbarItem;
 
-		private static int GetDropInsertIndex(ListView listView, DragEventArgs e)
+		private static int ResolveDropInsertIndex(ListView listView, DragEventArgs e)
 		{
 			for (int index = 0; index < listView.Items.Count; index++)
 			{
@@ -271,8 +273,8 @@ namespace Files.App.Views.Settings
 
 		private void ViewModel_CloseRequested(object? sender, EventArgs e)
 		{
-			isSessionComplete = true;
-			ownerWindow?.Close();
+			skipSessionRestoreOnUnload = true;
+			hostWindow?.Close();
 		}
 	}
 }
