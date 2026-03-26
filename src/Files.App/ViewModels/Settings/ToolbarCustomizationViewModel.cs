@@ -1,8 +1,6 @@
 // Copyright (c) Files Community
 // Licensed under the MIT License.
 
-using System.Windows.Input;
-
 namespace Files.App.ViewModels.Settings
 {
 	public sealed partial class ToolbarCustomizationViewModel : ObservableObject
@@ -11,6 +9,10 @@ namespace Files.App.ViewModels.Settings
 		private readonly ICommandManager CommandManager;
 
 		private readonly Dictionary<string, ObservableCollection<ToolbarItemDescriptor>> toolbarItemsByContext = new(StringComparer.Ordinal);
+		private IEnumerable<ToolbarItemDescriptor> AllToolbarItems => toolbarItemsByContext.Values.SelectMany(static items => items);
+		private IEnumerable<string> ToolbarContextIds => ToolbarContexts.Select(static context => context.Key);
+		private IEnumerable<ToolbarItemDescriptor> AvailableToolbarItems
+			=> ToolbarItemDescriptor.GetAvailableItemsForContext(GetCurrentToolbarContextId(), CommandManager);
 
 		public ObservableCollection<KeyValuePair<string, string>> ToolbarContexts { get; } = [];
 
@@ -47,22 +49,12 @@ namespace Files.App.ViewModels.Settings
 		private bool isToolbarCustomizationSessionActive;
 		private Dictionary<string, List<ToolbarItemSettingsEntry>>? toolbarCustomizationSessionSnapshot;
 
-		public ICommand RemoveToolbarItemCommand { get; }
-		public ICommand ResetToolbarCommand { get; }
-		public ICommand SaveToolbarCommand { get; }
-		public ICommand CancelToolbarCommand { get; }
-
 		public event EventHandler? CloseRequested;
 
 		public ToolbarCustomizationViewModel(IUserSettingsService userSettingsService, ICommandManager commandManager)
 		{
 			UserSettingsService = userSettingsService;
 			CommandManager = commandManager;
-
-			RemoveToolbarItemCommand = new RelayCommand<ToolbarItemDescriptor>(ExecuteRemoveToolbarItem);
-			ResetToolbarCommand = new RelayCommand(ExecuteResetToolbar);
-			SaveToolbarCommand = new RelayCommand(ExecuteSaveToolbar);
-			CancelToolbarCommand = new RelayCommand(ExecuteCancelToolbar);
 
 			InitializeToolbarContexts();
 			SelectedToolbarContextId = ToolbarDefaultsTemplate.AlwaysVisibleContextId;
@@ -82,20 +74,19 @@ namespace Files.App.ViewModels.Settings
 		}
 
 		public void SaveToolbarCustomizationSession()
-		{
-			if (!isToolbarCustomizationSessionActive)
-				return;
-
-			SaveToolbarItems();
-			EndToolbarCustomizationSession();
-		}
+			=> CompleteToolbarCustomizationSession(saveChanges: true);
 
 		public void CancelToolbarCustomizationSession()
+			=> CompleteToolbarCustomizationSession(saveChanges: false);
+
+		private void CompleteToolbarCustomizationSession(bool saveChanges)
 		{
 			if (!isToolbarCustomizationSessionActive)
 				return;
 
-			if (toolbarCustomizationSessionSnapshot is not null)
+			if (saveChanges)
+				SaveToolbarItems();
+			else if (toolbarCustomizationSessionSnapshot is not null)
 				ReplaceToolbarItems(toolbarCustomizationSessionSnapshot, saveChanges: true);
 
 			EndToolbarCustomizationSession();
@@ -116,14 +107,18 @@ namespace Files.App.ViewModels.Settings
 			OnPropertyChanged(nameof(IsSelectedContextAlwaysVisible));
 		}
 
-		private void InitializeToolbarCustomization()
+		private void InitializeToolbarContexts()
 		{
-			InitializeToolbarContexts();
-			SelectedToolbarContextId = ToolbarDefaultsTemplate.AlwaysVisibleContextId;
-			LoadToolbarItems();
+			ToolbarContexts.Clear();
+
+			foreach (var contextId in GetKnownToolbarContextIds())
+			{
+				ToolbarContexts.Add(new(contextId, ToolbarItemDescriptor.GetContextDisplayName(contextId)));
+				_ = GetToolbarItems(contextId);
+			}
 		}
 
-		private void InitializeToolbarContexts()
+		private IEnumerable<string> GetKnownToolbarContextIds()
 		{
 			var knownContexts = new HashSet<string>(ToolbarDefaultsTemplate.DefaultItemsByContext.Keys, StringComparer.Ordinal)
 			{
@@ -131,32 +126,15 @@ namespace Files.App.ViewModels.Settings
 				ToolbarDefaultsTemplate.OtherContextsContextId,
 			};
 
-			foreach (var group in CommandManager.Groups.All)
-			{
-				if (string.IsNullOrEmpty(group.Name))
-					continue;
+			knownContexts.UnionWith(CommandManager.Groups.All
+				.Where(group => !string.IsNullOrEmpty(group.Name))
+				.Select(group => ToolbarItemDescriptor.ResolveToolbarSectionId(ToolbarItemDescriptor.CreateGroupIdentifier(group.Name), CommandManager)));
 
-				knownContexts.Add(ToolbarItemDescriptor.ResolveToolbarSectionId(ToolbarItemDescriptor.CreateGroupIdentifier(group.Name), CommandManager));
-			}
+			knownContexts.UnionWith(CommandManager
+				.Where(command => command.Code is not CommandCodes.None && command.IsAccessibleGlobally)
+				.Select(command => ToolbarItemDescriptor.ResolveToolbarSectionId(command.Code.ToString(), CommandManager)));
 
-			foreach (var command in CommandManager)
-			{
-				if (command.Code is CommandCodes.None || !command.IsAccessibleGlobally)
-					continue;
-
-				knownContexts.Add(ToolbarItemDescriptor.ResolveToolbarSectionId(command.Code.ToString(), CommandManager));
-			}
-
-			ToolbarContexts.Clear();
-
-			foreach (var contextId in ToolbarDefaultsTemplate.ContextOrder)
-			{
-				if (!knownContexts.Contains(contextId))
-					continue;
-
-				ToolbarContexts.Add(new(contextId, ToolbarItemDescriptor.GetContextDisplayName(contextId)));
-				_ = GetToolbarItems(contextId);
-			}
+			return ToolbarDefaultsTemplate.ContextOrder.Where(knownContexts.Contains);
 		}
 
 		private void LoadToolbarItems()
@@ -171,9 +149,9 @@ namespace Files.App.ViewModels.Settings
 		private void ReplaceToolbarItems(IReadOnlyDictionary<string, List<ToolbarItemSettingsEntry>> itemsByContext, bool saveChanges)
 		{
 			isReplacingToolbarItems = true;
-			UnsubscribeItemPropertyChanged();
+			UpdateItemPropertySubscriptions(AllToolbarItems, subscribe: false);
 
-			foreach (var contextId in ToolbarContexts.Select(static context => context.Key))
+			foreach (var contextId in ToolbarContextIds)
 				GetToolbarItems(contextId).Clear();
 
 			foreach (var pair in itemsByContext)
@@ -181,14 +159,13 @@ namespace Files.App.ViewModels.Settings
 				var contextId = ToolbarDefaultsTemplate.NormalizeContextId(pair.Key);
 				var items = GetToolbarItems(contextId);
 
-				foreach (var settingsEntry in pair.Value)
-				{
-					if (ToolbarItemDescriptor.Resolve(settingsEntry, CommandManager, contextId) is { } descriptor)
-						items.Add(descriptor);
-				}
+				foreach (var descriptor in pair.Value
+					.Select(settingsEntry => ToolbarItemDescriptor.Resolve(settingsEntry, CommandManager, contextId))
+					.OfType<ToolbarItemDescriptor>())
+					items.Add(descriptor);
 			}
 
-			SubscribeItemPropertyChanged();
+			UpdateItemPropertySubscriptions(AllToolbarItems, subscribe: true);
 			isReplacingToolbarItems = false;
 
 			RefreshAvailableItems();
@@ -201,9 +178,7 @@ namespace Files.App.ViewModels.Settings
 
 		private Dictionary<string, List<ToolbarItemSettingsEntry>> NormalizeToolbarItemsByContext(IReadOnlyDictionary<string, List<ToolbarItemSettingsEntry>> itemsByContext)
 		{
-			var normalized = ToolbarContexts
-				.Select(static context => context.Key)
-				.ToDictionary(static contextId => contextId, static _ => new List<ToolbarItemSettingsEntry>(), StringComparer.Ordinal);
+			var normalized = ToolbarContextIds.ToDictionary(static contextId => contextId, static _ => new List<ToolbarItemSettingsEntry>(), StringComparer.Ordinal);
 
 			foreach (var pair in itemsByContext)
 			{
@@ -211,8 +186,11 @@ namespace Files.App.ViewModels.Settings
 				if (!normalized.TryGetValue(contextId, out var items))
 					continue;
 
-				foreach (var settingsEntry in pair.Value)
-						items.Add(new(commandCode: settingsEntry.CommandCode, commandGroup: settingsEntry.CommandGroup, showIcon: settingsEntry.ShowIcon, showLabel: settingsEntry.ShowLabel));
+				items.AddRange(pair.Value.Select(static settingsEntry => new ToolbarItemSettingsEntry(
+					commandCode: settingsEntry.CommandCode,
+					commandGroup: settingsEntry.CommandGroup,
+					showIcon: settingsEntry.ShowIcon,
+					showLabel: settingsEntry.ShowLabel)));
 			}
 
 			return normalized;
@@ -223,96 +201,89 @@ namespace Files.App.ViewModels.Settings
 			if (isReplacingToolbarItems)
 				return;
 
-			if (e.OldItems is not null)
-			{
-				foreach (ToolbarItemDescriptor item in e.OldItems)
-					item.PropertyChanged -= ToolbarItem_PropertyChanged;
-			}
+			UpdateItemPropertySubscriptions(e.OldItems, subscribe: false);
+			UpdateItemPropertySubscriptions(e.NewItems, subscribe: true);
 
-			if (e.NewItems is not null)
-			{
-				foreach (ToolbarItemDescriptor item in e.NewItems)
-					item.PropertyChanged += ToolbarItem_PropertyChanged;
-			}
-
-			if (isToolbarCustomizationSessionActive)
-				HasToolbarChanges = true;
-			else
-				SaveToolbarItems();
+			HandleToolbarChange();
 		}
 
 		private void ToolbarItem_PropertyChanged(object? sender, PropertyChangedEventArgs e)
 		{
-			if (e.PropertyName is nameof(ToolbarItemDescriptor.ShowIcon)
-				or nameof(ToolbarItemDescriptor.ShowLabel))
-			{
-				if (isToolbarCustomizationSessionActive)
-					HasToolbarChanges = true;
-				else
-					SaveToolbarItems();
-			}
+			if (e.PropertyName is not nameof(ToolbarItemDescriptor.ShowIcon)
+				and not nameof(ToolbarItemDescriptor.ShowLabel))
+				return;
+
+			HandleToolbarChange();
 		}
 
 		private Dictionary<string, List<ToolbarItemSettingsEntry>> CreateCurrentToolbarItemsSnapshot()
-			=> ToolbarContexts
-				.Select(static context => context.Key)
-				.ToDictionary(
+			=> ToolbarContextIds.ToDictionary(
 					contextId => contextId,
 					contextId => GetToolbarItems(contextId).Select(static item => item.ToSettingsEntry()).ToList(),
 					StringComparer.Ordinal);
 
-		private void SubscribeItemPropertyChanged()
+		private void HandleToolbarChange()
 		{
-			foreach (var item in toolbarItemsByContext.Values.SelectMany(static items => items))
-				item.PropertyChanged += ToolbarItem_PropertyChanged;
+			if (isToolbarCustomizationSessionActive)
+			{
+				HasToolbarChanges = true;
+				return;
+			}
+
+			SaveToolbarItems();
 		}
 
-		private void UnsubscribeItemPropertyChanged()
+		private void UpdateItemPropertySubscriptions(System.Collections.IEnumerable? items, bool subscribe)
 		{
-			foreach (var item in toolbarItemsByContext.Values.SelectMany(static items => items))
-				item.PropertyChanged -= ToolbarItem_PropertyChanged;
+			if (items is null)
+				return;
+
+			foreach (var item in items.OfType<ToolbarItemDescriptor>())
+			{
+				if (subscribe)
+					item.PropertyChanged += ToolbarItem_PropertyChanged;
+				else
+					item.PropertyChanged -= ToolbarItem_PropertyChanged;
+			}
 		}
 
 		private void RefreshAvailableItems()
 		{
 			AvailableToolbarTreeItems.Clear();
 
-			var availableItems = ToolbarItemDescriptor.GetAvailableItemsForContext(GetCurrentToolbarContextId(), CommandManager)
-				.OrderBy(static item => item.CategoryPath, StringComparer.OrdinalIgnoreCase)
-				.ThenBy(static item => item.ExtendedDisplayName, StringComparer.OrdinalIgnoreCase)
-				.ToList();
-
 			var categoryNodesByPath = new Dictionary<string, ToolbarAvailableTreeItem>(StringComparer.OrdinalIgnoreCase);
 
-			foreach (var item in availableItems)
+			foreach (var item in AvailableToolbarItems
+				.OrderBy(static item => item.CategoryPath, StringComparer.OrdinalIgnoreCase)
+				.ThenBy(static item => item.ExtendedDisplayName, StringComparer.OrdinalIgnoreCase))
+			{
+				AddTreeItem(GetParentNode(item.CategoryPath), new(item.ExtendedDisplayNameWithGroupSuffix, item));
+			}
+
+			ToolbarAvailableTreeItem? GetParentNode(string categoryPath)
 			{
 				ToolbarAvailableTreeItem? parentNode = null;
-				var pathSegments = item.CategoryPath.Split(" / ", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+				var currentPath = string.Empty;
 
-				if (pathSegments.Length > 0)
+				foreach (var segment in categoryPath.Split(" / ", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
 				{
-					var currentPath = string.Empty;
-					foreach (var segment in pathSegments)
+					currentPath = string.IsNullOrEmpty(currentPath) ? segment : $"{currentPath}/{segment}";
+
+					if (!categoryNodesByPath.TryGetValue(currentPath, out var categoryNode))
 					{
-						currentPath = string.IsNullOrEmpty(currentPath) ? segment : $"{currentPath}/{segment}";
-
-						if (!categoryNodesByPath.TryGetValue(currentPath, out var categoryNode))
-						{
-							categoryNode = new(segment);
-
-							if (parentNode is null)
-								AvailableToolbarTreeItems.Add(categoryNode);
-							else
-								parentNode.Children.Add(categoryNode);
-
-							categoryNodesByPath[currentPath] = categoryNode;
-						}
-
-						parentNode = categoryNode;
+						categoryNode = new(segment);
+						AddTreeItem(parentNode, categoryNode);
+						categoryNodesByPath[currentPath] = categoryNode;
 					}
+
+					parentNode = categoryNode;
 				}
 
-				var treeItem = new ToolbarAvailableTreeItem(item.ExtendedDisplayNameWithGroupSuffix, item);
+				return parentNode;
+			}
+
+			void AddTreeItem(ToolbarAvailableTreeItem? parentNode, ToolbarAvailableTreeItem treeItem)
+			{
 				if (parentNode is null)
 					AvailableToolbarTreeItems.Add(treeItem);
 				else
@@ -328,8 +299,7 @@ namespace Files.App.ViewModels.Settings
 			var contextId = GetCurrentToolbarContextId();
 			var targetItems = GetToolbarItems(contextId);
 
-			var clonedItem = ToolbarItemDescriptor.Resolve(sourceItem.ToSettingsEntry(), CommandManager, contextId);
-			if (clonedItem is null)
+			if (ToolbarItemDescriptor.Resolve(sourceItem.ToSettingsEntry(), CommandManager, contextId) is not { } clonedItem)
 				return;
 
 			// When dragging new items to the added actions list, default to show label
@@ -339,31 +309,36 @@ namespace Files.App.ViewModels.Settings
 			targetItems.Insert(insertIndex, clonedItem);
 		}
 
-		private void ExecuteRemoveToolbarItem(ToolbarItemDescriptor? item)
+		[RelayCommand]
+		private void RemoveToolbarItem(ToolbarItemDescriptor? item)
 		{
 			if (item is not null)
 				GetToolbarItems(item.ContextId).Remove(item);
 		}
 
-		private void ExecuteResetToolbar()
+		[RelayCommand]
+		private void ResetToolbar()
 		{
-			ReplaceToolbarItems(ToolbarDefaultsTemplate.CreateDefaultItemsByContext(), saveChanges: !isToolbarCustomizationSessionActive);
-
-			if (isToolbarCustomizationSessionActive)
-				HasToolbarChanges = true;
+			ReplaceToolbarItems(ToolbarDefaultsTemplate.CreateDefaultItemsByContext(), saveChanges: false);
+			HandleToolbarChange();
 		}
 
-		private void ExecuteSaveToolbar()
+		[RelayCommand]
+		private void SaveToolbar()
 		{
 			SaveToolbarCustomizationSession();
-			CloseRequested?.Invoke(this, EventArgs.Empty);
+			RequestClose();
 		}
 
-		private void ExecuteCancelToolbar()
+		[RelayCommand]
+		private void CancelToolbar()
 		{
 			CancelToolbarCustomizationSession();
-			CloseRequested?.Invoke(this, EventArgs.Empty);
+			RequestClose();
 		}
+
+		private void RequestClose()
+			=> CloseRequested?.Invoke(this, EventArgs.Empty);
 
 		private ObservableCollection<ToolbarItemDescriptor> GetToolbarItems(string contextId)
 		{

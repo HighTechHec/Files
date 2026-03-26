@@ -16,47 +16,59 @@ namespace Files.App.Views.Settings
 		public static void Show()
 		{
 			var appThemeModeService = Ioc.Default.GetRequiredService<IAppThemeModeService>();
-
-			if (toolbarCustomizationWindow is null)
-			{
-				var frame = new Frame { RequestedTheme = appThemeModeService.AppThemeMode };
-
-				toolbarCustomizationWindow = new WindowEx(460, 400);
-				toolbarCustomizationWindow.PersistenceId = WindowPersistenceId;
-				toolbarCustomizationWindow.Closed += ToolbarCustomizationWindow_Closed;
-
-				var appWindow = toolbarCustomizationWindow.AppWindow;
-				appWindow.Title = Strings.CustomizeToolbar.GetLocalizedResource();
-				appWindow.TitleBar.ExtendsContentIntoTitleBar = true;
-				toolbarCustomizationWindow.ExtendsContentIntoTitleBar = true;
-				appWindow.SetIcon(AppLifecycleHelper.AppIconPath);
-				toolbarCustomizationWindow.IsMaximizable = false;
-				toolbarCustomizationWindow.Content = frame;
-				toolbarCustomizationWindow.SystemBackdrop = new AppSystemBackdrop(true);
-
-				frame.Navigate(typeof(ToolbarCustomizationPage), toolbarCustomizationWindow, new SuppressNavigationTransitionInfo());
-				if (frame.Content is ToolbarCustomizationPage toolbarCustomizationPage)
-					toolbarCustomizationWindow.SetTitleBar(toolbarCustomizationPage.TitleBarElement);
-
-				var width = Math.Max(1, Convert.ToInt32(760 * App.AppModel.AppWindowDPI));
-				var height = Math.Max(1, Convert.ToInt32(560 * App.AppModel.AppWindowDPI));
-				appWindow.Resize(new SizeInt32(width, height));
-			}
-			else if (toolbarCustomizationWindow.Content is Frame frame)
-			{
+			var window = toolbarCustomizationWindow;
+			if (window is null)
+				toolbarCustomizationWindow = window = CreateWindow(appThemeModeService);
+			else if (window.Content is Frame frame)
 				frame.RequestedTheme = appThemeModeService.AppThemeMode;
-				if (frame.Content is ToolbarCustomizationPage toolbarCustomizationPage)
-					toolbarCustomizationWindow.SetTitleBar(toolbarCustomizationPage.TitleBarElement);
-			}
+
+			UpdateTitleBar(window);
 
 			appThemeModeService.SetAppThemeMode(
-				toolbarCustomizationWindow,
-				toolbarCustomizationWindow.AppWindow.TitleBar,
+				window,
+				window.AppWindow.TitleBar,
 				appThemeModeService.AppThemeMode,
 				callThemeModeChangedEvent: false);
 
-			toolbarCustomizationWindow.AppWindow.Show();
-			toolbarCustomizationWindow.Activate();
+			window.AppWindow.Show();
+			window.Activate();
+		}
+
+		private static WindowEx CreateWindow(IAppThemeModeService appThemeModeService)
+		{
+			var frame = new Frame { RequestedTheme = appThemeModeService.AppThemeMode };
+			var window = new WindowEx(460, 400)
+			{
+				PersistenceId = WindowPersistenceId,
+				ExtendsContentIntoTitleBar = true,
+				IsMaximizable = false,
+				Content = frame,
+				SystemBackdrop = new AppSystemBackdrop(true),
+			};
+
+			window.Closed += ToolbarCustomizationWindow_Closed;
+
+			var appWindow = window.AppWindow;
+			appWindow.Title = Strings.CustomizeToolbar.GetLocalizedResource();
+			appWindow.TitleBar.ExtendsContentIntoTitleBar = true;
+			appWindow.SetIcon(AppLifecycleHelper.AppIconPath);
+
+			frame.Navigate(typeof(ToolbarCustomizationPage), window, new SuppressNavigationTransitionInfo());
+			Resize(appWindow);
+			return window;
+		}
+
+		private static void UpdateTitleBar(WindowEx window)
+		{
+			if ((window.Content as Frame)?.Content is ToolbarCustomizationPage page)
+				window.SetTitleBar(page.TitleBarElement);
+		}
+
+		private static void Resize(Microsoft.UI.Windowing.AppWindow appWindow)
+		{
+			var width = Math.Max(1, Convert.ToInt32(760 * App.AppModel.AppWindowDPI));
+			var height = Math.Max(1, Convert.ToInt32(560 * App.AppModel.AppWindowDPI));
+			appWindow.Resize(new SizeInt32(width, height));
 		}
 
 		private static void ToolbarCustomizationWindow_Closed(object sender, WindowEventArgs _)
